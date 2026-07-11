@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: resource-forecaster-pdb
+  namespace: monitoring
+  labels:
+    app: resource-forecaster
+    component: availability
+spec:
+  # # Ensure high availability during voluntary disruptions
+  # # Allows at most 1 pod to be unavailable during maintenance
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: resource-forecaster
