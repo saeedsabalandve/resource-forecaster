@@ -1,0 +1,182 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resource-forecaster
+  namespace: monitoring
+  labels:
+    app: resource-forecaster
+    component: core
+    version: v1.0.0
+  annotations:
+    # Prometheus scraping configuration
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  # High availability with pod anti-affinity
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: resource-forecaster
+  template:
+    metadata:
+      labels:
+        app: resource-forecaster
+        component: core
+        version: v1.0.0
+      annotations:
+        # Hash of config to trigger rollout on config changes
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      # Service account with least privilege
+      serviceAccountName: resource-forecaster
+      
+      # Pod anti-affinity for HA across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - resource-forecaster
+              topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 80
+            preference:
+              matchExpressions:
+              - key: node-type
+                operator: In
+                values:
+                - compute-optimized
+      
+      # Security context for production hardening
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      
+      # Init container for database migration
+      initContainers:
+      - name: db-migrate
+        image: resource-forecaster:latest
+        command: ["/app/migrate"]
+        envFrom:
+        - secretRef:
+            name: forecaster-secrets
+        - configMapRef:
+            name: forecaster-config
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+      
+      containers:
+      - name: forecaster
+        image: resource-forecaster:latest
+        imagePullPolicy: IfNotPresent
+        
+        ports:
+        - name: http-api
+          containerPort: 8080
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        
+        # Production-grade health probes
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http-api
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http-api
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+          successThreshold: 1
+        
+        startupProbe:
+          httpGet:
+            path: /health/startup
+            port: http-api
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 30
+          successThreshold: 1
+        
+        # Environment from ConfigMap and Secrets
+        envFrom:
+        - configMapRef:
+            name: forecaster-config
+        - secretRef:
+            name: forecaster-secrets
+        
+        env:
+        # Pod metadata for telemetry
+        - name: KUBERNETES_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: KUBERNETES_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: KUBERNETES_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        
+        # Resource limits for QoS
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        
+        # Volume mounts for model storage and configs
+        volumeMounts:
+        - name: model-storage
+          mountPath: /data/models
+        - name: tmp
+          mountPath: /tmp
+      
+      # Volumes configuration
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: forecaster-models-pvc
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+      
+      # Graceful shutdown configuration
+      terminationGracePeriodSeconds: 60
